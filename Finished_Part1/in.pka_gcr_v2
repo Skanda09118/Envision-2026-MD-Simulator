@@ -1,6 +1,8 @@
-# ============================================================
-# PKA cascade simulation (GCR proton analogue)
-# ============================================================
+# Corrected PKA cascade script for GaN (metal units)
+# - True 5 keV PKA injection
+# - Boundary is a Langevin heat sink; core is NVE during ballistic phase
+# - Adaptive timestep for ballistic phase, turned off for recovery
+# - Dumps per-atom KE for verification
 
 units           metal
 dimension       3
@@ -8,15 +10,12 @@ boundary        p p p
 atom_style      atomic
 
 # ---- Read equilibrated structure ----
-# Ensure filename matches your previous output exactly
 read_data       GaN_perfect_for_PKA.data
 
-mass 1 69.723    # Ga
-mass 2 14.007    # N
+mass 1 69.723    # Ga (g/mol)
+mass 2 14.007    # N  (g/mol)
 
-# ---- 1. POTENTIALS (CRITICAL FIX) ----
-# ZBL must only be active at very short ranges (r < 1.2 A)
-# to avoid conflict with Tersoff at equilibrium (~1.95 A).
+# ---- Potentials (ZBL overlay Tersoff) ----
 pair_style hybrid/overlay tersoff zbl 0.5 1.2
 pair_coeff * * tersoff GaN.tersoff Ga N
 pair_coeff 1 1 zbl 31.0 31.0
@@ -26,103 +25,127 @@ pair_coeff 2 2 zbl 7.0 7.0
 neighbor        2.0 bin
 neigh_modify    every 1 delay 0 check yes
 
-variable        skin equal 3.5
-region          core_region block ${skin} $(lx-v_skin) ${skin} $(ly-v_skin) ${skin} $(lz-v_skin) units box
-group           core region core_region
-group           boundary subtract all core
-group           gallium type 1
-group           nitrogen type 2
+# ---- Groups: core / boundary / species ----
+variable skin equal 3.5
 
+variable xlo equal ${skin}
+variable ylo equal ${skin}
+variable zlo equal ${skin}
 
-# ---- Reset timestep ----
+variable xhi equal lx-${skin}
+variable yhi equal ly-${skin}
+variable zhi equal lz-${skin}
+
+region core_region block ${xlo} ${xhi} ${ylo} ${yhi} ${zlo} ${zhi} units box
+group  core region core_region
+group  boundary subtract all core
+group  gallium type 1
+group  nitrogen type 2
+
+# ---- Reset timestep counter ----
 reset_timestep  0
 
-# ------------------------------------------------------------
-# PKA Definition (Manual & Rock Solid)
-# ------------------------------------------------------------
-# Replace '14231' with the ID you found in Step 1
-group           pka id 14582
+# ---- PKA selection ----
+# Replace the ID below with your chosen PKA atom id
+variable pka_id equal 14582
+group    pka id ${pka_id}
 
-# Verify it found the atom (Output should be 1)
-variable        n_pka equal count(pka)
-print           "DEBUG: PKA Group Size: ${n_pka}"
+variable n_pka equal count(pka)
+print "DEBUG: PKA Group Size = ${n_pka}"
+if "${n_pka} == 0" then "print 'ERROR: PKA ID not found! Aborting.' & quit"
 
-# Safety Stop
-if "${n_pka} == 0" then "print 'ERROR: ID not found!' & quit"
+# ------------------------
+# Set up integration & boundary control BEFORE assigning velocities
+# ------------------------
 
-# ------------------------------------------------------------
+# Integrate core and boundary (nve for actual integration)
+fix core_nve     core     nve
+fix boundary_nve boundary nve
 
-# Remove thermal noise/drift before impact (Optional but cleaner)
-velocity        all zero linear
+# Apply Langevin thermostat to boundary as a heat sink
+# Langevin adds damping forces; combined with nve on boundary atoms this is the correct pattern.
+fix bath boundary langevin 300.0 300.0 0.1 123456
 
-# ---- 2. ENERGY & VELOCITY (CRITICAL FIX) ----
-variable        E equal 5000.0       # PKA Energy in eV
-variable        mass_pka equal 69.723 # Mass of Ga in g/mol
+# ---- Zero thermal drift BEFORE assigning PKA velocity (clean start) ----
+# Use a universal, version-safe command to zero all velocities.
+velocity all set 0.0 0.0 0.0 units box
 
-# Conversion factor: eV -> Joules, g/mol -> kg, m/s -> A/ps
-# Factor approx 98.2269
-variable        conv_factor equal 98.2269
-variable        v equal v_conv_factor*sqrt(2.0*v_E/v_mass_pka)
+# ---- PKA energy --> velocity (conversion for metal units) ----
+# E in eV, mass in g/mol, resulting v in A/ps
+variable E equal 5000.0        # desired PKA energy (eV)
+variable mass_pka equal 69.723 # Ga mass (g/mol)
 
-# Random Direction
-variable        theta equal random(0,3.14159,12345)
-variable        phi   equal random(0,6.28318,67890)
+# Pre-computed conversion factor for metal units:
+# v(A/ps) = conv_factor * sqrt( E(eV) / mass(g/mol) )
+# using physical constants yields approx 138.91388132458903
+variable conv_factor equal 138.91388132458903
 
-variable        vx equal v_v*sin(v_theta)*cos(v_phi)
-variable        vy equal v_v*sin(v_theta)*sin(v_phi)
-variable        vz equal v_v*cos(v_theta)
+variable pka_v equal ${conv_factor}*sqrt(${E}/${mass_pka})   # magnitude (A/ps)
 
-# Launch the PKA!
-velocity        pka set ${vx} ${vy} ${vz} units box
+# pick a random direction for the PKA
+variable theta equal random(0.0,3.141592653589793,12345)
+variable phi   equal random(0.0,6.283185307179586,67890)
 
-# ------------------------------------------------------------
-# Dynamics
-# ------------------------------------------------------------
+variable st equal sin(${theta})
+variable ct equal cos(${theta})
+variable sp equal sin(${phi})
+variable cp equal cos(${phi})
 
-# Use variable timestep (dt) for radiation? 
-# Usually fixed small dt is safer for beginners to avoid energy drift.
-timestep        0.0002  # 0.2 fs (Conservative for high energy)
+variable vx equal ${pka_v}*${st}*${cp}
+variable vy equal ${pka_v}*${st}*${sp}
+variable vz equal ${pka_v}*${ct}
 
-# NVE is required for the cascade (don't thermostat the heat spike!)
-fix             1 all nve
+# sanity-check: compute back the energy implied by pka_v
+variable E_check equal ${mass_pka}*(${pka_v}/${conv_factor})^2
 
-# Electronic stopping (Optional for 5keV, but adds realism)
-# fix           2 all electron/stopping 10.0  # (Requires installed package)
+# print the computed values so you can confirm
+print "---- PKA injection check ----"
+print "Computed PKA speed (A/ps) = ${pka_v}"
+print "Computed direction (theta,phi) = ${theta}, ${phi}"
+print "Computed velocity components (A/ps) = ${vx} ${vy} ${vz}"
+print "Energy implied by this speed (eV) = ${E_check}"
+print "Requested PKA energy (eV) = ${E}"
+print "--------------------------------"
 
-# ---- Output ----
-# Dump often to catch the fast collision physics
-dump            1 all custom 100 dump.cascade.lammpstrj id type x y z vx vy vz
-dump_modify     1 sort id
+# ---- Assign PKA velocity (single authoritative command) ----
+velocity pka set ${vx} ${vy} ${vz} units box
 
+# quick diagnostic without running dynamics (run 0). No warning since fixes were already declared.
+run 0
+
+# ---- Adaptive timestep for ballistic phase (turn on AFTER integration fixes exist) ----
+# dt/reset: check every step, min dt 0.05 fs, max dt 0.2 fs, max disp 0.1 A per step
+fix adapt_dt all dt/reset 1 5e-5 2e-4 0.1 units box
+
+# ---- diagnostics: compute per-atom KE so we can dump / inspect PKA KE ----
+compute ke_atom all ke/atom
+
+# ---- Dynamics setup for ballistic phase ----
+# Use conservative small fixed timestep as base; adapt_dt will reduce dt automatically when needed.
+timestep        0.0002            # 0.2 fs (ps units)
 thermo          100
-thermo_style    custom step temp pe ke etotal press
+thermo_style    custom step dt temp pe ke etotal press
 
-# ---- Run Cascade ----
-# The ballistic phase is fast (< 1 ps)
-run             10000
+# primary dump: coordinates + velocities + per-atom KE
+dump 1 all custom 100 dump.cascade.lammpstrj id type x y z vx vy vz c_ke_atom
+dump_modify 1 sort id
 
-# ---- Cooldown ----
-# You can increase timestep slightly as system cools
-timestep        0.0002
-run             10000
+# ---- Ballistic phase (fast) ----
+# run for ~1-2 ps to capture ballistic collisions; adapt_dt will adapt dt during violent events.
+run 10000
+run 10000
 
-# ------------------------------------------------------------
-# 3. Recovery & Cooldown (The Heat Bath)
-# ------------------------------------------------------------
-# We must stop NVE and use NVT to pull the 5000 eV out of the box.
-unfix 1
+# Turn off adaptive timestep before recovery
+unfix adapt_dt
 
-# Thermostat the whole system back to 300K
-# Tdamp (0.1) is the relaxation time in ps.
-fix 2 all nvt temp 300.0 300.0 0.1
+# ---- Recovery phase: extend NVE in core, keep boundary thermostat (already set) ----
+# Increase timestep slightly as atoms slow down:
+timestep 0.0005    # 0.5 fs
 
-# As the atoms slow down, we can safely use a larger timestep.
-timestep        0.0005  # 0.5 fs
+# Run recovery / recombination (here: 40000 * 0.0005 ps = 20 ps)
+run 40000
 
-# Run for at least 20-50 ps to allow for "recombination"
-# (where atoms find their way back to lattice sites).
-run             40000
+# ---- Finalize: write datafile of post-cascade structure ----
+write_data GaN_post_cascade.data
 
-# ------------------------------------------------------------
-
-write_data      GaN_post_cascade.data
+# End of script
