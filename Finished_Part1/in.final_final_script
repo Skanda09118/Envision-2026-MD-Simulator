@@ -1,0 +1,30 @@
+# --- Initial Setup ---
+units           metal
+atom_style      atomic
+boundary        p p p
+
+# --- Load your latest data ---
+read_data       GaN_final_relaxed.data
+
+# --- Potential ---
+pair_style      tersoff
+pair_coeff      * * GaN.tersoff Ga N
+
+# --- Neighbor list settings (keeping your efficient settings) ---
+neighbor        2.0 bin
+neigh_modify    delay 10 every 1 check yes
+
+# --- ANISOTROPIC Relaxation (The Fix) ---
+# 'aniso' allows Lx, Ly, and Lz to adjust independently to 0.0 bar
+fix             1 all npt temp 300.0 300.0 0.1 aniso 0.0 0.0 1.0
+
+# --- Diagnostics ---
+thermo          1000
+thermo_style    custom step temp press pxx pyy pzz lx ly lz pe
+
+# --- Short Run ---
+# 20,000 steps is plenty to bleed off anisotropic stress
+run             20000
+
+# --- Final Output for Bombardment ---
+write_data      GaN_perfect_for_PKA.data

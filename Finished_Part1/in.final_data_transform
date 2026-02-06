@@ -1,0 +1,32 @@
+# --- Initial Setup ---
+units           metal
+atom_style      atomic
+boundary        p p p
+
+# --- Load Data ---
+read_data       GaN_bulk_equilibriated.data
+
+# --- Potential (Ensure your coefficients match your previous run) ---
+# Example using Tersoff - adjust if you used a different style
+pair_style      tersoff
+pair_coeff      * * GaN.tersoff Ga N
+
+# --- Neighbor list settings ---
+neighbor        2.0 bin
+neigh_modify    delay 0 every 1 check yes
+
+# --- Thermalization & Pressure Relaxation ---
+# We use NPT to drive the pressure to 0.0 bar
+# 'iso 0.0 0.0 1.0' means relax all sides to 0 bar with a 1ps damping
+fix             1 all npt temp 300.0 300.0 0.1 aniso 0.0 0.0 1.0
+
+# --- Diagnostics ---
+thermo          1000
+thermo_style    custom step temp press pe lx ly lz pxx pyy pzz
+
+# --- Run until Energy/Pressure stabilize ---
+# 50,000 steps (50 ps) is usually enough to bleed off that 16k bar
+run             50000
+
+# --- Output the Final Equilibrated State ---
+write_data      GaN_final_relaxed.data
