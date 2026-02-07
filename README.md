@@ -14,3 +14,4 @@ There are 3 data file generation (in.Data_File_Generatation_Part$) which also ha
 There is also a in.pka_gcr_v2 which is the main pka ballistic impact file , please run this 
 
 log.lammps is the log which holds all the last run information
+
