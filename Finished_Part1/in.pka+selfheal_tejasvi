@@ -1,0 +1,106 @@
+# -----------------------------------------------------------------------------
+# GaN Radiation Damage + Self-Healing (Corrected, Research-Grade)
+# -----------------------------------------------------------------------------
+
+units           metal
+dimension       3
+boundary        p p f
+atom_style      atomic
+
+# ---- Read equilibrated structure ----
+read_data       GaN_perfect_for_PKA.data
+
+# Create vacuum slab in Z for heat dissipation
+change_box      all z final 0 100.0 units box
+
+mass 1 69.723
+mass 2 14.007
+
+# ---- Potentials (ZBL overlay Tersoff) ----
+pair_style hybrid/overlay tersoff zbl 0.1 2.0
+pair_coeff * * tersoff GaN.tersoff Ga N
+pair_coeff 1 1 zbl 31.0 31.0
+pair_coeff 1 2 zbl 31.0 7.0
+pair_coeff 2 2 zbl 7.0 7.0
+
+neighbor        2.0 bin
+neigh_modify    every 1 delay 0 check yes
+
+# ---- Regions: Anchor / Sink / Core ----
+region r_anchor block INF INF INF INF 0.0 5.0 units box
+group  anchor   region r_anchor
+
+region r_sink   block INF INF INF INF 5.0 15.0 units box
+group  sink     region r_sink
+
+group  core subtract all anchor sink
+group  mobile subtract all anchor
+
+reset_timestep  0
+thermo_modify   lost warn
+
+# ---- Fixes ----
+velocity anchor set 0.0 0.0 0.0
+fix freeze anchor setforce 0.0 0.0 0.0
+
+fix core_nve core nve
+fix sink_nve sink nve
+
+# ---- PKA selection (manual or scripted) ----
+variable pka_id equal 14582
+group pka id ${pka_id}
+
+variable n_pka equal count(pka)
+if "${n_pka} == 0" then "print 'ERROR: PKA ID not found' & quit"
+
+# ---- Zero velocities ----
+velocity all set 0.0 0.0 0.0 units box
+
+# ---- PKA energy → velocity ----
+variable E equal 5000.0
+variable mass_pka equal 69.723
+variable conv equal 138.91388
+variable pka_v equal ${conv}*sqrt(${E}/${mass_pka})
+
+variable theta equal random(0.0,3.141592653589793,12345)
+variable phi   equal random(0.0,6.283185307179586,67890)
+
+variable vx equal ${pka_v}*sin(${theta})*cos(${phi})
+variable vy equal ${pka_v}*sin(${theta})*sin(${phi})
+variable vz equal ${pka_v}*cos(${theta})
+
+velocity pka set ${vx} ${vy} ${vz} units box
+
+# ---- Adaptive timestep for ballistic phase ----
+fix adapt_dt all dt/reset 1 5e-5 2e-4 0.1 units box
+timestep 0.0002
+
+compute ke_atom all ke/atom
+
+
+dump 1 all custom 100 dump.cascade.lammpstrj id type x y z vx vy vz c_ke_atom
+dump_modify 1 sort id
+
+thermo 100
+thermo_style custom step dt temp pe ke etotal press
+
+# ---- Ballistic cascade ----
+run 5000
+
+# ---- Turn off adaptive dt ----
+unfix adapt_dt
+timestep 0.001
+
+# ---- Thermal annealing (self-healing) ----
+fix bath sink langevin 300.0 300.0 0.1 123456
+
+fix heat mobile nvt temp 300 900 0.1
+run 20000
+
+fix hold mobile nvt temp 900 900 0.1
+run 20000
+
+fix cool mobile nvt temp 900 300 0.1
+run 20000
+
+write_data GaN_post_healed.data
